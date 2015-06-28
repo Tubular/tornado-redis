@@ -244,6 +244,8 @@ class Client(object):
         self.password = password
         self.selected_db = selected_db or 0
         self._pipeline = None
+        self.executing = False
+        self.command_queue = deque()
 
     def __del__(self):
         try:
@@ -386,9 +388,18 @@ class Client(object):
     ####
 
     @gen.engine
+    def queue_command(self, callback=None):
+        self.command_queue.append(callback)
+
+    @gen.engine
     def execute_command(self, cmd, *args, **kwargs):
         result = None
         execute_pending = cmd not in ('AUTH', 'SELECT')
+
+        # You can only one run command down a connection at a time, otherwise you end up with parsing issues
+        if self.command_queue:
+            yield gen.Task(self.queue_command)
+        self.command_queue.appendleft(None)
 
         callback = kwargs.get('callback', None)
         if 'callback' in kwargs:
@@ -446,6 +457,13 @@ class Client(object):
 
         if execute_pending:
             self.connection.execute_pending_command()
+
+        #  Dequeue any pending commands
+        while self.command_queue:
+            cb = self.command_queue.popleft()
+            if cb is not None:
+                cb()
+                break
 
         if callback:
             callback(result)
